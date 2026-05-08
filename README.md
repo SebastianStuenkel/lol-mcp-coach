@@ -67,6 +67,7 @@ REGION=euw1
 Add the server to your Claude Desktop config file:
 
 **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
 **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
@@ -99,3 +100,5 @@ Once connected to Claude:
 - *"What is my average KDA this week and how does my CS compare to average?"*
 - *"Look at my ranked stats and give me a win condition based on my playstyle."*
 - *"Break down match EUW1_1234567890 — what went wrong in the mid game?"*
+
+Co Authored by Claude
