@@ -68,12 +68,17 @@ async def get_summoner_by_puuid(puuid: str) -> dict:
     return await riot_get(url)
 
 
-async def get_match_ids(puuid: str, count: int = 5) -> list[str]:
-    """Holt die letzten N Match-IDs eines Spielers."""
+async def get_match_ids(puuid: str, count: int = 5, queue: int = None) -> list[str]:
+    """Holt die letzten N Match-IDs eines Spielers.
+    queue=420 → Ranked Solo/Duo
+    queue=400 → Normal Draft
+    queue=None → Alle Modi
+    """
     regional = REGIONAL_ROUTING.get(REGION, "europe")
+    queue_param = f"&queue={queue}" if queue else ""
     url = (
         f"https://{regional}.api.riotgames.com/lol/match/v5/matches/by-puuid"
-        f"/{puuid}/ids?queue=420&count={count}"  # 420 = Solo/Duo Ranked
+        f"/{puuid}/ids?count={count}{queue_param}"
     )
     return await riot_get(url)
 
@@ -156,13 +161,14 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_last_matches",
-            description="Fetcht die letzten Solo/Duo Ranked Games eines Spielers mit allen wichtigen Stats",
+            description="Fetcht die letzten Games eines Spielers mit allen wichtigen Stats. Kann nach Modus filtern.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "summoner_name": {"type": "string", "description": "Summoner Name"},
                     "tag": {"type": "string", "description": "Riot Tag z.B. EUW"},
                     "count": {"type": "integer", "description": "Anzahl der Games (1-10, Standard: 5)"},
+                    "queue_filter": {"type": "string", "description": "Modus-Filter: 'ranked' (Solo/Duo), 'normal' (Normal Draft), 'alle' (alle Modi, Standard)"},
                 },
                 "required": ["summoner_name"],
             },
@@ -216,8 +222,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         # ----------------------------------------------------------------
         elif name == "get_last_matches":
             count = min(arguments.get("count", 5), 10)
+            queue_filter = arguments.get("queue_filter", "alle")
+
+            # Queue ID mapping
+            queue_map = {"ranked": 420, "normal": 400, "alle": None}
+            queue_id = queue_map.get(queue_filter, None)
+            queue_label = {"ranked": "Ranked Solo/Duo", "normal": "Normal Draft", "alle": "Alle Modi"}.get(queue_filter, "Alle Modi")
+
             puuid = await get_puuid(summoner_name, tag)
-            match_ids = await get_match_ids(puuid, count)
+            match_ids = await get_match_ids(puuid, count, queue=queue_id)
 
             all_stats = []
             for match_id in match_ids:
@@ -227,7 +240,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 all_stats.append(stats)
 
             # Zusammenfassung bauen
-            lines = [f"📊 Letzte {count} Ranked Games von {summoner_name}#{tag}\n"]
+            lines = [f"📊 Letzte {count} Games ({queue_label}) von {summoner_name}#{tag}\n"]
             lines.append("=" * 50)
 
             for i, s in enumerate(all_stats, 1):
