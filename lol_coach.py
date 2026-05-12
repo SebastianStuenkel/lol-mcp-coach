@@ -684,60 +684,52 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         # ----------------------------------------------------------------
         elif name == "get_champion_pool":
-            count = min(max(arguments.get("count", 20), 5), 30)
-            queue_filter = arguments.get("queue_filter", "ranked")
+            count = min(arguments.get("count", 10), 20)  # Max 20, Standard 10
+            queue_filter = arguments.get("queue_filter", "alle")
+
             queue_map = {"ranked": 420, "normal": 400, "alle": None}
-            queue_id = queue_map.get(queue_filter, 420)
-            queue_label = {"ranked": "Ranked", "normal": "Normal", "alle": "Alle Modi"}.get(queue_filter, "Ranked")
+            queue_id = queue_map.get(queue_filter, None)
 
             puuid = await get_puuid(summoner_name, tag)
             match_ids = await get_match_ids(puuid, count, queue=queue_id)
 
-            all_match_data = await asyncio.gather(*[get_match_details(mid) for mid in match_ids])
+            champion_stats = {}
+            for match_id in match_ids:
+                await asyncio.sleep(1.2)  # Rate limit: max 20 req/s aber sicher bleiben
+                match_data = await get_match_details(match_id)
+                stats = extract_player_stats(match_data, puuid)
+                champ = stats["champion"]
 
-            champ_games: dict[str, list[dict]] = {}
-            for match_data in all_match_data:
-                s = extract_player_stats(match_data, puuid)
-                if not s:
-                    continue
-                champ_games.setdefault(s["champion"], []).append(s)
+                if champ not in champion_stats:
+                    champion_stats[champ] = {
+                        "games": 0, "wins": 0, "kills": 0, "deaths": 0,
+                        "assists": 0, "cs_per_min": [], "damage": [],
+                        "vision_per_min": []
+                    }
 
-            sorted_champs = sorted(champ_games.items(), key=lambda x: len(x[1]), reverse=True)
+                c = champion_stats[champ]
+                c["games"] += 1
+                c["wins"] += 1 if stats["win"] else 0
+                c["kills"] += stats["kills"]
+                c["deaths"] += stats["deaths"]
+                c["assists"] += stats["assists"]
+                c["cs_per_min"].append(stats["cs_per_min"])
+                c["damage"].append(stats["damage_dealt"])
+                c["vision_per_min"].append(stats["vision_per_min"])
 
-            pos_short_map = {"TOP": "Top", "JUNGLE": "Jgl", "MIDDLE": "Mid", "BOTTOM": "Bot", "UTILITY": "Sup"}
+            lines = [f"🏆 Champion Pool Analyse: {summoner_name}#{tag} (letzte {count} Games)\n"]
+            lines.append("=" * 50)
 
-            lines = [f"🎯 Champion Pool: {summoner_name}#{tag}  |  letzte {len(match_ids)} Games ({queue_label})\n"]
-            header = f"{'Champion':<16}  {'GP':>3}  {'WR':>5}  {'KDA':>5}  {'CS/min':>6}  {'Damage':>8}  {'Vision/m':>8}  Pos"
-            lines.append(header)
-            lines.append("─" * len(header))
+            for champ, c in sorted(champion_stats.items(), key=lambda x: -x[1]["games"]):
+                winrate = round(c["wins"] / c["games"] * 100)
+                kda = round((c["kills"] + c["assists"]) / max(c["deaths"], 1), 2)
+                avg_cs = round(sum(c["cs_per_min"]) / len(c["cs_per_min"]), 1)
+                avg_dmg = round(sum(c["damage"]) / len(c["damage"]))
+                avg_vision = round(sum(c["vision_per_min"]) / len(c["vision_per_min"]), 2)
 
-            for champ, games in sorted_champs:
-                gp = len(games)
-                wins = sum(1 for g in games if g["win"])
-                avg_kda = round(sum(g["kda"] for g in games) / gp, 2)
-                avg_cs = round(sum(g["cs_per_min"] for g in games) / gp, 1)
-                avg_dmg = round(sum(g["damage_dealt"] for g in games) / gp)
-                avg_vis = round(sum(g["vision_per_min"] for g in games) / gp, 2)
-                positions = [g["position"] for g in games if g["position"] not in ("UNKNOWN", "")]
-                pos = pos_short_map.get(max(set(positions), key=positions.count), "?") if positions else "?"
-                lines.append(
-                    f"{champ:<16}  {gp:>3}  {round(wins/gp*100):>4}%  {avg_kda:>5.2f}"
-                    f"  {avg_cs:>6.1f}  {avg_dmg:>8,}  {avg_vis:>8.2f}  {pos}"
-                )
-
-            lines.append("─" * len(header))
-
-            enough = [(c, g) for c, g in sorted_champs if len(g) >= 2]
-            if enough:
-                best = max(enough, key=lambda x: sum(1 for g in x[1] if g["win"]) / len(x[1]))
-                worst = min(enough, key=lambda x: sum(1 for g in x[1] if g["win"]) / len(x[1]))
-                best_wr = round(sum(1 for g in best[1] if g["win"]) / len(best[1]) * 100)
-                worst_wr = round(sum(1 for g in worst[1] if g["win"]) / len(worst[1]) * 100)
-                lines.append(f"\n🏆 Beste WR:       {best[0]} ({best_wr}% in {len(best[1])} Games)")
-                if worst[0] != best[0]:
-                    lines.append(f"⚠️  Schlechteste WR: {worst[0]} ({worst_wr}% in {len(worst[1])} Games)")
-
-            lines.append(f"📊 Meistgespielt:  {sorted_champs[0][0]} ({len(sorted_champs[0][1])} Games)")
+                lines.append(f"\n{champ} — {c['games']} Games | {winrate}% WR")
+                lines.append(f"  KDA: {c['kills']}/{c['deaths']}/{c['assists']} = {kda}")
+                lines.append(f"  CS/min: {avg_cs} | Avg Damage: {avg_dmg:,} | Vision/min: {avg_vision}")
 
             return [TextContent(type="text", text="\n".join(lines))]
 
