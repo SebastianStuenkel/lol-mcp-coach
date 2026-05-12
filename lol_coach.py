@@ -347,6 +347,24 @@ async def list_tools() -> list[Tool]:
                 "required": ["match_id", "summoner_name"],
             },
         ),
+        Tool(
+            name="get_champion_pool",
+            description=(
+                "Analysiert den Champion-Pool eines Spielers über mehrere Games: "
+                "Winrate, KDA, CS/min, Damage und Vision pro Champion. "
+                "Ideal um Stärken/Schwächen im Champ-Pool zu erkennen."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "summoner_name": {"type": "string", "description": "Summoner Name"},
+                    "tag": {"type": "string", "description": "Riot Tag z.B. EUW"},
+                    "count": {"type": "integer", "description": "Anzahl der Games (5-30, Standard: 20)"},
+                    "queue_filter": {"type": "string", "description": "'ranked' (Standard), 'normal', 'alle'"},
+                },
+                "required": ["summoner_name"],
+            },
+        ),
     ]
 
 
@@ -621,6 +639,65 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     lane = lane_map.get(t["lane"], t["lane"])
                     loser = "Dein Team" if t["lost_by_team"] == p_team else "Gegner   "
                     lines.append(f"  min {t['minute']:>5}  │  {lane} Tower  →  {loser} verloren")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # ----------------------------------------------------------------
+        elif name == "get_champion_pool":
+            count = min(max(arguments.get("count", 20), 5), 30)
+            queue_filter = arguments.get("queue_filter", "ranked")
+            queue_map = {"ranked": 420, "normal": 400, "alle": None}
+            queue_id = queue_map.get(queue_filter, 420)
+            queue_label = {"ranked": "Ranked", "normal": "Normal", "alle": "Alle Modi"}.get(queue_filter, "Ranked")
+
+            puuid = await get_puuid(summoner_name, tag)
+            match_ids = await get_match_ids(puuid, count, queue=queue_id)
+
+            all_match_data = await asyncio.gather(*[get_match_details(mid) for mid in match_ids])
+
+            champ_games: dict[str, list[dict]] = {}
+            for match_data in all_match_data:
+                s = extract_player_stats(match_data, puuid)
+                if not s:
+                    continue
+                champ_games.setdefault(s["champion"], []).append(s)
+
+            sorted_champs = sorted(champ_games.items(), key=lambda x: len(x[1]), reverse=True)
+
+            pos_short_map = {"TOP": "Top", "JUNGLE": "Jgl", "MIDDLE": "Mid", "BOTTOM": "Bot", "UTILITY": "Sup"}
+
+            lines = [f"🎯 Champion Pool: {summoner_name}#{tag}  |  letzte {len(match_ids)} Games ({queue_label})\n"]
+            header = f"{'Champion':<16}  {'GP':>3}  {'WR':>5}  {'KDA':>5}  {'CS/min':>6}  {'Damage':>8}  {'Vision/m':>8}  Pos"
+            lines.append(header)
+            lines.append("─" * len(header))
+
+            for champ, games in sorted_champs:
+                gp = len(games)
+                wins = sum(1 for g in games if g["win"])
+                avg_kda = round(sum(g["kda"] for g in games) / gp, 2)
+                avg_cs = round(sum(g["cs_per_min"] for g in games) / gp, 1)
+                avg_dmg = round(sum(g["damage_dealt"] for g in games) / gp)
+                avg_vis = round(sum(g["vision_per_min"] for g in games) / gp, 2)
+                positions = [g["position"] for g in games if g["position"] not in ("UNKNOWN", "")]
+                pos = pos_short_map.get(max(set(positions), key=positions.count), "?") if positions else "?"
+                lines.append(
+                    f"{champ:<16}  {gp:>3}  {round(wins/gp*100):>4}%  {avg_kda:>5.2f}"
+                    f"  {avg_cs:>6.1f}  {avg_dmg:>8,}  {avg_vis:>8.2f}  {pos}"
+                )
+
+            lines.append("─" * len(header))
+
+            enough = [(c, g) for c, g in sorted_champs if len(g) >= 2]
+            if enough:
+                best = max(enough, key=lambda x: sum(1 for g in x[1] if g["win"]) / len(x[1]))
+                worst = min(enough, key=lambda x: sum(1 for g in x[1] if g["win"]) / len(x[1]))
+                best_wr = round(sum(1 for g in best[1] if g["win"]) / len(best[1]) * 100)
+                worst_wr = round(sum(1 for g in worst[1] if g["win"]) / len(worst[1]) * 100)
+                lines.append(f"\n🏆 Beste WR:       {best[0]} ({best_wr}% in {len(best[1])} Games)")
+                if worst[0] != best[0]:
+                    lines.append(f"⚠️  Schlechteste WR: {worst[0]} ({worst_wr}% in {len(worst[1])} Games)")
+
+            lines.append(f"📊 Meistgespielt:  {sorted_champs[0][0]} ({len(sorted_champs[0][1])} Games)")
 
             return [TextContent(type="text", text="\n".join(lines))]
 
