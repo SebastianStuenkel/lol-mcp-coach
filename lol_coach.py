@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 RIOT_API_KEY = os.getenv("RIOT_API_KEY", "")
+SUMMONER_NAME = os.getenv("SUMMONER_NAME", "")
 REGION = os.getenv("REGION", "euw1")  # euw1, na1, eun1, kr, ...
 
 # Regional routing (für Match-V5 API)
