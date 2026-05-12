@@ -97,6 +97,30 @@ async def get_match_timeline(match_id: str) -> dict:
     return await riot_get(url)
 
 
+_champion_cache: dict[int, str] = {}
+
+async def get_champion_id_map() -> dict[int, str]:
+    """Fetcht Champion ID → Name Mapping von Data Dragon (wird gecacht)."""
+    global _champion_cache
+    if _champion_cache:
+        return _champion_cache
+    async with httpx.AsyncClient() as client:
+        resp = await client.get("https://ddragon.leagueoflegends.com/api/versions.json", timeout=5.0)
+        latest = resp.json()[0]
+        resp2 = await client.get(
+            f"https://ddragon.leagueoflegends.com/cdn/{latest}/data/en_US/champion.json",
+            timeout=10.0,
+        )
+        _champion_cache = {int(v["key"]): v["name"] for v in resp2.json()["data"].values()}
+    return _champion_cache
+
+
+async def get_live_game(puuid: str) -> dict:
+    """Holt das aktuell laufende Spiel eines Spielers."""
+    url = f"https://{REGION}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}"
+    return await riot_get(url)
+
+
 def extract_player_stats(match_data: dict, puuid: str) -> dict:
     """Extrahiert die relevanten Stats des Spielers aus einem Match."""
     participants = match_data["info"]["participants"]
@@ -361,6 +385,22 @@ async def list_tools() -> list[Tool]:
                     "tag": {"type": "string", "description": "Riot Tag z.B. EUW"},
                     "count": {"type": "integer", "description": "Anzahl der Games (5-30, Standard: 20)"},
                     "queue_filter": {"type": "string", "description": "'ranked' (Standard), 'normal', 'alle'"},
+                },
+                "required": ["summoner_name"],
+            },
+        ),
+        Tool(
+            name="get_live_game",
+            description=(
+                "Zeigt das aktuell laufende Spiel eines Spielers: "
+                "Champion-Kompositionen beider Teams, Summoner Spells, Bans und Spielmodus. "
+                "Ideal für Pre-Game Analyse."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "summoner_name": {"type": "string", "description": "Summoner Name"},
+                    "tag": {"type": "string", "description": "Riot Tag z.B. EUW"},
                 },
                 "required": ["summoner_name"],
             },
@@ -698,6 +738,81 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     lines.append(f"⚠️  Schlechteste WR: {worst[0]} ({worst_wr}% in {len(worst[1])} Games)")
 
             lines.append(f"📊 Meistgespielt:  {sorted_champs[0][0]} ({len(sorted_champs[0][1])} Games)")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # ----------------------------------------------------------------
+        elif name == "get_live_game":
+            puuid = await get_puuid(summoner_name, tag)
+
+            # Parallel: Champion-Map cachen + Live-Game fetchen
+            # Live-Game 404 = Spieler nicht in einem Spiel → eigene Fehlermeldung
+            try:
+                champ_map, game_data = await asyncio.gather(
+                    get_champion_id_map(),
+                    get_live_game(puuid),
+                )
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    return [TextContent(type="text", text=f"❌ {summoner_name}#{tag} ist gerade nicht in einem Spiel.")]
+                raise
+
+            queue_names = {
+                420: "Ranked Solo/Duo", 440: "Ranked Flex",
+                400: "Normal Draft", 430: "Normal Blind",
+                450: "ARAM", 700: "Clash",
+            }
+            spell_names = {
+                1: "Cleanse", 3: "Exhaust", 4: "Flash", 6: "Ghost",
+                7: "Heal", 11: "Smite", 12: "Teleport", 13: "Clarity",
+                14: "Ignite", 21: "Barrier", 32: "Mark",
+            }
+
+            queue_id = game_data.get("gameQueueConfigId", 0)
+            queue_name = queue_names.get(queue_id, f"Queue {queue_id}")
+            game_length = game_data.get("gameLength", 0)
+            mins, secs = divmod(game_length, 60)
+
+            participants = game_data.get("participants", [])
+            player = next((p for p in participants if p.get("puuid") == puuid), None)
+            p_team = player["teamId"] if player else 100
+            own_team = [p for p in participants if p["teamId"] == p_team]
+            enemy_team = [p for p in participants if p["teamId"] != p_team]
+
+            bans = game_data.get("bannedChampions", [])
+            def ban_names(team_id):
+                return [
+                    champ_map.get(b["championId"], f"#{b['championId']}")
+                    for b in bans if b["teamId"] == team_id and b["championId"] != -1
+                ]
+
+            def fmt_player(p: dict, mark_self: bool = False) -> str:
+                champ = champ_map.get(p["championId"], f"#{p['championId']}")
+                sp1 = spell_names.get(p.get("spell1Id", 0), str(p.get("spell1Id", "?")))
+                sp2 = spell_names.get(p.get("spell2Id", 0), str(p.get("spell2Id", "?")))
+                name = p.get("riotId", "Unknown")
+                marker = "  ← DU" if mark_self else ""
+                return f"  {champ:<16}  {sp1} + {sp2:<9}  {name}{marker}"
+
+            lines = [f"🔴 Live Game: {summoner_name}#{tag}"]
+            lines.append(f"Modus: {queue_name}  |  Spielzeit: {mins}:{secs:02d}\n")
+
+            own_bans = ban_names(p_team)
+            enemy_bans = ban_names(200 if p_team == 100 else 100)
+            if own_bans:
+                lines.append(f"Dein Team Bans: {', '.join(own_bans)}")
+            if enemy_bans:
+                lines.append(f"Gegner Bans:    {', '.join(enemy_bans)}")
+            if own_bans or enemy_bans:
+                lines.append("")
+
+            lines.append("── Dein Team ──")
+            for p in own_team:
+                lines.append(fmt_player(p, mark_self=p.get("puuid") == puuid))
+
+            lines.append("\n── Gegner ──")
+            for p in enemy_team:
+                lines.append(fmt_player(p))
 
             return [TextContent(type="text", text="\n".join(lines))]
 
