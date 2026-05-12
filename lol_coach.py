@@ -137,6 +137,37 @@ def extract_player_stats(match_data: dict, puuid: str) -> dict:
         "wards_placed": player.get("wardsPlaced", 0),
         "wards_killed": player.get("wardsKilled", 0),
         "control_wards": player.get("visionWardsBoughtInGame", 0),
+        # Zeit & Sterben
+        "time_spent_dead": player.get("totalTimeSpentDead", 0),
+        "time_spent_dead_per_min": round(player.get("totalTimeSpentDead", 0) / game_duration_min, 2),
+        "longest_time_alive": player.get("longestTimeSpentLiving", 0),
+        # Damage-Breakdown
+        "damage_physical": player.get("physicalDamageDealtToChampions", 0),
+        "damage_magic": player.get("magicDamageDealtToChampions", 0),
+        "damage_true": player.get("trueDamageDealtToChampions", 0),
+        "damage_to_objectives": player.get("damageDealtToObjectives", 0),
+        "damage_to_turrets": player.get("damageDealtToTurrets", 0),
+        "damage_self_mitigated": player.get("damageSelfMitigated", 0),
+        # Objectives & Map
+        "objectives_stolen": player.get("objectivesStolen", 0),
+        "baron_kills": player.get("baronKills", 0),
+        "dragon_kills": player.get("dragonKills", 0),
+        "inhibitor_kills": player.get("inhibitorKills", 0),
+        # CC & Utility
+        "time_ccing_others": player.get("timeCCingOthers", 0),
+        "total_cc_dealt": player.get("totalTimeCCDealt", 0),
+        # Healing
+        "total_heal": player.get("totalHeal", 0),
+        "total_heals_on_teammates": player.get("totalHealsOnTeammates", 0),
+        "total_damage_shielded": player.get("totalDamageShieldedOnTeammates", 0),
+        # Consumables & Items
+        "consumables_purchased": player.get("consumablesPurchased", 0),
+        "items_purchased": player.get("itemsPurchased", 0),
+        # Spell casts
+        "spell_q_casts": player.get("spell1Casts", 0),
+        "spell_w_casts": player.get("spell2Casts", 0),
+        "spell_e_casts": player.get("spell3Casts", 0),
+        "spell_r_casts": player.get("spell4Casts", 0),
     }
 
 
@@ -274,6 +305,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             lines.append(f"  Winrate: {wins}/{count} ({round(wins/count*100)}%)")
             lines.append(f"  Avg KDA: {avg_kda} | Avg CS/min: {avg_cs} | Avg Vision/min: {avg_vision}")
 
+            avg_dead_pct = round(
+                sum(s["time_spent_dead"] / (s["game_duration_min"] * 60) * 100 for s in all_stats) / len(all_stats), 1
+            )
+            avg_damage = round(sum(s["damage_dealt"] for s in all_stats) / len(all_stats))
+            avg_cc = round(sum(s["time_ccing_others"] for s in all_stats) / len(all_stats), 1)
+            lines.append(f"  Avg Damage an Champs: {avg_damage:,} | Avg Zeit tot: {avg_dead_pct}% der Spielzeit")
+            if avg_cc:
+                lines.append(f"  Avg CC-Zeit: {avg_cc}s")
+
             return [TextContent(type="text", text="\n".join(lines))]
 
         # ----------------------------------------------------------------
@@ -298,12 +338,41 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             lines.append(f"Vision Score: {stats['vision_score']} | Wards: {stats['wards_placed']} platziert, {stats['wards_killed']} zerstört")
             lines.append(f"Control Wards: {stats['control_wards']}")
             lines.append(f"Kill Participation: {stats['kills_participation']}%")
-            lines.append(f"Damage dealt: {stats['damage_dealt']:,} | Damage taken: {stats['damage_taken']:,}")
             lines.append(f"Gold: {stats['gold_earned']:,} ({stats['gold_per_min']}/min)")
 
-            if stats["penta_kills"]: lines.append(f"🏆 PENTA KILL!")
-            elif stats["quadra_kills"]: lines.append(f"🔥 Quadra Kill!")
-            elif stats["triple_kills"]: lines.append(f"Triple Kill: {stats['triple_kills']}x")
+            lines.append("\n── Damage Breakdown ──")
+            lines.append(f"Gesamt an Champions: {stats['damage_dealt']:,}")
+            lines.append(f"  Physisch: {stats['damage_physical']:,} | Magisch: {stats['damage_magic']:,} | True: {stats['damage_true']:,}")
+            lines.append(f"Damage genommen: {stats['damage_taken']:,} | Selbst mitigiert: {stats['damage_self_mitigated']:,}")
+            lines.append(f"Damage an Objectives: {stats['damage_to_objectives']:,} | an Türmen: {stats['damage_to_turrets']:,}")
+
+            lines.append("\n── Sterben & Überleben ──")
+            dead_pct = round(stats['time_spent_dead'] / (stats['game_duration_min'] * 60) * 100, 1)
+            lines.append(f"Zeit tot: {stats['time_spent_dead']}s ({dead_pct}% der Spielzeit) | {stats['time_spent_dead_per_min']}s/min")
+            lines.append(f"Längste Lebenszeit am Stück: {stats['longest_time_alive']}s")
+
+            if stats["time_ccing_others"] or stats["total_heal"] or stats["total_heals_on_teammates"]:
+                lines.append("\n── Utility ──")
+                if stats["time_ccing_others"]:
+                    lines.append(f"CC-Zeit auf Gegnern: {stats['time_ccing_others']}s")
+                if stats["total_heal"]:
+                    lines.append(f"Heal (gesamt): {stats['total_heal']:,} | an Teammates: {stats['total_heals_on_teammates']:,}")
+                if stats["total_damage_shielded"]:
+                    lines.append(f"Shields auf Teammates: {stats['total_damage_shielded']:,}")
+
+            lines.append("\n── Objectives & Map ──")
+            lines.append(f"Türme zerstört: {stats['turrets_destroyed']} | Inhibitoren: {stats['inhibitor_kills']}")
+            lines.append(f"Baron Kills: {stats['baron_kills']} | Dragon Kills: {stats['dragon_kills']}")
+            if stats["objectives_stolen"]:
+                lines.append(f"Objectives gestohlen: {stats['objectives_stolen']}")
+
+            lines.append("\n── Spell Casts ──")
+            lines.append(f"Q: {stats['spell_q_casts']}x | W: {stats['spell_w_casts']}x | E: {stats['spell_e_casts']}x | R: {stats['spell_r_casts']}x")
+            lines.append(f"Consumables gekauft: {stats['consumables_purchased']} | Items insgesamt: {stats['items_purchased']}")
+
+            if stats["penta_kills"]: lines.append(f"\n🏆 PENTA KILL!")
+            elif stats["quadra_kills"]: lines.append(f"\n🔥 Quadra Kill!")
+            elif stats["triple_kills"]: lines.append(f"\nTriple Kill: {stats['triple_kills']}x")
 
             lines.append("\n── Team Übersicht ──")
             player_team_id = next(p["teamId"] for p in participants if p["puuid"] == puuid)
