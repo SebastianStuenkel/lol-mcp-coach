@@ -37,7 +37,8 @@ This server exposes your League of Legends match history and ranked stats to Cla
 ## Installation
 
 ```bash
-# Clone or navigate to the project
+# Clone the repository
+git clone <repo-url>
 cd lol-mcp-coach
 
 # Create and activate a virtual environment
@@ -45,7 +46,7 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install mcp httpx python-dotenv
+pip install -r requirements.txt
 ```
 
 ## Configuration
@@ -109,4 +110,5 @@ Once connected to Claude:
 - *"Am I currently in a live game? What champions are the enemies playing?"*
 - *"Have I been improving or getting worse over my last 20 games?"*
 
-Co Authored by Claude
+---
+Built with [Claude Code](https://claude.ai/code)
