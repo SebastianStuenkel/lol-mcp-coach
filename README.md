@@ -11,9 +11,13 @@ This server exposes your League of Legends match history and ranked stats to Cla
 | Tool | Description |
 |---|---|
 | `get_summoner_info` | Player profile: summoner name, level, PUUID |
-| `get_last_matches` | Last N ranked Solo/Duo games with KDA, CS, vision, damage, gold |
-| `get_single_match` | Full breakdown of a specific match by ID |
-| `get_ranked_stats` | Current season LP, tier, rank, and winrate for Solo/Duo and Flex |
+| `get_last_matches` | Last N games with KDA, CS, vision, damage, gold, death time, CC and more. Filter by ranked / normal / all |
+| `get_single_match` | Full per-match breakdown: damage split (physical/magic/true), death time, objectives, spell casts, utility stats, team overview |
+| `get_ranked_stats` | Current season LP, tier, rank, and win rate for Solo/Duo and Flex |
+| `get_timeline_analysis` | Match timeline: gold & CS diff vs lane opponent at 10/15 min, death timeline by phase, objective order, tower losses |
+| `get_champion_pool` | Champion pool stats over up to 20 games: win rate, KDA, CS/min, damage, vision per champion |
+| `get_live_game` | Current live game: both team compositions, summoner spells, bans and queue mode — ideal for pre-game prep |
+| `get_trend_analysis` | Performance trend over time: are KDA, CS/min, vision, damage and win rate improving or declining across game windows? |
 
 ## Prerequisites
 
@@ -100,5 +104,9 @@ Once connected to Claude:
 - *"What is my average KDA this week and how does my CS compare to average?"*
 - *"Look at my ranked stats and give me a win condition based on my playstyle."*
 - *"Break down match EUW1_1234567890 — what went wrong in the mid game?"*
+- *"Show me the timeline for my last match — was I ahead or behind in lane at 15 minutes?"*
+- *"What are my best and worst champions over the last 20 games?"*
+- *"Am I currently in a live game? What champions are the enemies playing?"*
+- *"Have I been improving or getting worse over my last 20 games?"*
 
 Co Authored by Claude

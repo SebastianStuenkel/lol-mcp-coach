@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 RIOT_API_KEY = os.getenv("RIOT_API_KEY", "")
-SUMMONER_NAME = os.getenv("SUMMONER_NAME", "")
 REGION = os.getenv("REGION", "euw1")  # euw1, na1, eun1, kr, ...
 
 # Regional routing (für Match-V5 API)
@@ -405,6 +404,24 @@ async def list_tools() -> list[Tool]:
                 "required": ["summoner_name"],
             },
         ),
+        Tool(
+            name="get_trend_analysis",
+            description=(
+                "Zeigt die Performance-Entwicklung eines Spielers über Zeit: "
+                "Werden KDA, CS/min, Vision, Damage und Winrate besser oder schlechter? "
+                "Teilt die letzten Games in Zeitfenster auf und berechnet Trends."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "summoner_name": {"type": "string", "description": "Summoner Name"},
+                    "tag": {"type": "string", "description": "Riot Tag z.B. EUW"},
+                    "count": {"type": "integer", "description": "Anzahl der Games (max 20, Standard: 20)"},
+                    "queue_filter": {"type": "string", "description": "'ranked', 'normal', 'alle' (Standard: alle)"},
+                },
+                "required": ["summoner_name"],
+            },
+        ),
     ]
 
 
@@ -730,6 +747,109 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 lines.append(f"\n{champ} — {c['games']} Games | {winrate}% WR")
                 lines.append(f"  KDA: {c['kills']}/{c['deaths']}/{c['assists']} = {kda}")
                 lines.append(f"  CS/min: {avg_cs} | Avg Damage: {avg_dmg:,} | Vision/min: {avg_vision}")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # ----------------------------------------------------------------
+        elif name == "get_trend_analysis":
+            count = min(arguments.get("count", 20), 20)
+            queue_filter = arguments.get("queue_filter", "alle")
+            queue_map = {"ranked": 420, "normal": 400, "alle": None}
+            queue_id = queue_map.get(queue_filter, None)
+            queue_label = {"ranked": "Ranked", "normal": "Normal", "alle": "Alle Modi"}.get(queue_filter, "Alle Modi")
+
+            puuid = await get_puuid(summoner_name, tag)
+            match_ids = await get_match_ids(puuid, count, queue=queue_id)
+
+            if len(match_ids) < 4:
+                return [TextContent(type="text", text="❌ Mindestens 4 Games für Trend-Analyse benötigt.")]
+
+            # Älteste zuerst (match_ids kommt neueste-zuerst zurück)
+            all_stats = []
+            for match_id in reversed(match_ids):
+                await asyncio.sleep(1.2)
+                match_data = await get_match_details(match_id)
+                s = extract_player_stats(match_data, puuid)
+                if s:
+                    all_stats.append(s)
+
+            # In Fenster à 5 Games aufteilen
+            chunk_size = 5
+            chunks = [all_stats[i:i + chunk_size] for i in range(0, len(all_stats), chunk_size)]
+            if len(chunks[-1]) < 2:
+                chunks = chunks[:-1]
+            if len(chunks) < 2:
+                return [TextContent(type="text", text="❌ Nicht genug auswertbare Games für Trend-Analyse.")]
+
+            def cavg(chunk, key, decimals=2):
+                vals = [g[key] for g in chunk if key in g]
+                return round(sum(vals) / len(vals), decimals) if vals else 0
+
+            def cwr(chunk):
+                return round(sum(1 for g in chunk if g["win"]) / len(chunk) * 100)
+
+            # Metriken: (Label, Wert-Fn, Format-Fn)
+            metrics = [
+                ("WR%",        lambda c: cwr(c),                          lambda v: f"{v:.0f}%"),
+                ("KDA",        lambda c: cavg(c, "kda"),                  lambda v: f"{v:.2f}"),
+                ("CS/min",     lambda c: cavg(c, "cs_per_min", 1),        lambda v: f"{v:.1f}"),
+                ("Vision/min", lambda c: cavg(c, "vision_per_min"),       lambda v: f"{v:.2f}"),
+                ("Damage",     lambda c: cavg(c, "damage_dealt", 0),      lambda v: f"{int(v):,}"),
+                ("Gold/min",   lambda c: cavg(c, "gold_per_min", 0),      lambda v: f"{int(v):,}"),
+                ("Zeit tot%",  lambda c: round(
+                    sum(g["time_spent_dead"] / (g["game_duration_min"] * 60) * 100
+                        for g in c) / len(c), 1),                         lambda v: f"{v:.1f}%"),
+            ]
+
+            # Spalten-Header aufbauen
+            col_w = 11
+            n = len(chunks)
+            labels = []
+            for i in range(n):
+                start = i * chunk_size + 1
+                end = min((i + 1) * chunk_size, len(all_stats))
+                tag_label = " (alt)" if i == 0 else (" (neu)" if i == n - 1 else "")
+                labels.append(f"#{start}-{end}{tag_label}")
+
+            lines = [f"📈 Trend Analyse: {summoner_name}#{tag}  |  {len(all_stats)} Games ({queue_label})\n"]
+            header = f"{'Metrik':<12}" + "".join(f"{l:>{col_w}}" for l in labels) + "  Trend"
+            sep = "─" * len(header)
+            lines.append(header)
+            lines.append(sep)
+
+            improved, declined, neutral = [], [], []
+
+            for label, val_fn, fmt_fn in metrics:
+                values = [val_fn(c) for c in chunks]
+                first, last = values[0], values[-1]
+                pct = (last - first) / first * 100 if first != 0 else 0
+
+                # Für "Zeit tot" ist sinken gut
+                inverted = label == "Zeit tot%"
+                positive = pct < -5 if inverted else pct > 5
+                negative = pct > 5 if inverted else pct < -5
+
+                if positive:
+                    arrow = "↑"
+                    improved.append(f"{label} ({'+' if not inverted else ''}{round(pct)}%)")
+                elif negative:
+                    arrow = "↓"
+                    declined.append(f"{label} ({round(pct):+}%)")
+                else:
+                    arrow = "→"
+                    neutral.append(label)
+
+                row = f"{label:<12}" + "".join(f"{fmt_fn(v):>{col_w}}" for v in values) + f"  {arrow}"
+                lines.append(row)
+
+            lines.append(sep)
+            lines.append("")
+            if improved:
+                lines.append(f"🚀 Verbessert:     {', '.join(improved)}")
+            if declined:
+                lines.append(f"📉 Verschlechtert: {', '.join(declined)}")
+            if neutral:
+                lines.append(f"→  Stabil:         {', '.join(neutral)}")
 
             return [TextContent(type="text", text="\n".join(lines))]
 
