@@ -90,6 +90,13 @@ async def get_match_details(match_id: str) -> dict:
     return await riot_get(url)
 
 
+async def get_match_timeline(match_id: str) -> dict:
+    """Holt die Timeline eines Matches (Frame-by-Frame Events)."""
+    regional = REGIONAL_ROUTING.get(REGION, "europe")
+    url = f"https://{regional}.api.riotgames.com/lol/match/v5/matches/{match_id}/timeline"
+    return await riot_get(url)
+
+
 def extract_player_stats(match_data: dict, puuid: str) -> dict:
     """Extrahiert die relevanten Stats des Spielers aus einem Match."""
     participants = match_data["info"]["participants"]
@@ -171,6 +178,101 @@ def extract_player_stats(match_data: dict, puuid: str) -> dict:
     }
 
 
+def extract_timeline_stats(match_data: dict, timeline_data: dict, puuid: str) -> dict:
+    """Extrahiert Early-Game-Diffs, Tod-Timeline und Objective-Events aus der Match-Timeline."""
+    participants = match_data["info"]["participants"]
+    player = next((p for p in participants if p["puuid"] == puuid), None)
+    if not player:
+        return {}
+
+    pid = str(player["participantId"])
+    player_team = player["teamId"]
+    player_position = player.get("teamPosition", "")
+
+    opponent = next(
+        (p for p in participants
+         if p["teamId"] != player_team and p.get("teamPosition") == player_position and player_position),
+        None,
+    )
+    opp_pid = str(opponent["participantId"]) if opponent else None
+
+    frames = timeline_data["info"]["frames"]
+
+    def pframe(minute: int, p: str) -> dict:
+        if minute >= len(frames):
+            return {}
+        return frames[minute].get("participantFrames", {}).get(p, {})
+
+    def ts_min(ts: int) -> float:
+        return round(ts / 60000, 1)
+
+    stats: dict = {
+        "lane_opponent": opponent["championName"] if opponent else None,
+        "player_team": player_team,
+        "has_opponent_data": opp_pid is not None,
+    }
+
+    for minute in [10, 15]:
+        pf = pframe(minute, pid)
+        gold = pf.get("totalGold", 0)
+        cs = pf.get("minionsKilled", 0) + pf.get("jungleMinionsKilled", 0)
+        stats[f"gold_{minute}"] = gold
+        stats[f"cs_{minute}"] = cs
+        stats[f"level_{minute}"] = pf.get("level", 0)
+        if opp_pid:
+            of = pframe(minute, opp_pid)
+            stats[f"gold_diff_{minute}"] = gold - of.get("totalGold", 0)
+            opp_cs = of.get("minionsKilled", 0) + of.get("jungleMinionsKilled", 0)
+            stats[f"cs_diff_{minute}"] = cs - opp_cs
+
+    all_events = [e for frame in frames for e in frame.get("events", [])]
+
+    stats["death_events"] = [
+        {"minute": ts_min(e["timestamp"]), "position": e.get("position", {})}
+        for e in all_events
+        if e["type"] == "CHAMPION_KILL" and str(e.get("victimId", "")) == pid
+    ]
+
+    _monster_names = {
+        ("DRAGON", "FIRE_DRAGON"): "Infernal Dragon",
+        ("DRAGON", "WATER_DRAGON"): "Ocean Dragon",
+        ("DRAGON", "AIR_DRAGON"): "Cloud Dragon",
+        ("DRAGON", "EARTH_DRAGON"): "Mountain Dragon",
+        ("DRAGON", "HEXTECH_DRAGON"): "Hextech Dragon",
+        ("DRAGON", "CHEMTECH_DRAGON"): "Chemtech Dragon",
+        ("DRAGON", "ELDER_DRAGON"): "Elder Dragon",
+        ("BARON_NASHOR", ""): "Baron Nashor",
+        ("RIFTHERALD", ""): "Rift Herald",
+        ("HORDE", ""): "Voidgrub",
+        ("ATAKHAN", ""): "Atakhan",
+    }
+
+    stats["objective_events"] = []
+    for e in all_events:
+        if e["type"] != "ELITE_MONSTER_KILL":
+            continue
+        mtype = e.get("monsterType", "")
+        msub = e.get("monsterSubType", "")
+        label = _monster_names.get((mtype, msub)) or _monster_names.get((mtype, "")) or mtype
+        stats["objective_events"].append({
+            "label": label,
+            "minute": ts_min(e["timestamp"]),
+            "team": e.get("killerTeamId"),
+        })
+
+    stats["tower_events"] = [
+        {
+            "lane": e.get("laneType", ""),
+            "minute": ts_min(e["timestamp"]),
+            "lost_by_team": e.get("teamId"),
+        }
+        for e in all_events
+        if e["type"] == "BUILDING_KILL" and e.get("buildingType") == "TOWER_BUILDING"
+    ]
+
+    return stats
+
+
 # ---------------------------------------------------------------------------
 # MCP Tools
 # ---------------------------------------------------------------------------
@@ -227,6 +329,22 @@ async def list_tools() -> list[Tool]:
                     "tag": {"type": "string", "description": "Riot Tag z.B. EUW"},
                 },
                 "required": ["summoner_name"],
+            },
+        ),
+        Tool(
+            name="get_timeline_analysis",
+            description=(
+                "Analysiert die Match-Timeline: Gold/CS-Differenz vs. Lane-Gegner @ Min 10 & 15, "
+                "Tod-Timeline nach Phase, Objective-Reihenfolge (Dragon/Baron/Herald) und Tower-Timeline."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "match_id": {"type": "string", "description": "Match ID z.B. EUW1_1234567890"},
+                    "summoner_name": {"type": "string", "description": "Summoner Name des Spielers"},
+                    "tag": {"type": "string", "description": "Riot Tag z.B. EUW"},
+                },
+                "required": ["match_id", "summoner_name"],
             },
         ),
     ]
@@ -417,6 +535,96 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text="\n".join(lines))]
 
         # ----------------------------------------------------------------
+        elif name == "get_timeline_analysis":
+            match_id = arguments["match_id"]
+            puuid = await get_puuid(summoner_name, tag)
+            match_data, timeline_data = await asyncio.gather(
+                get_match_details(match_id),
+                get_match_timeline(match_id),
+            )
+            base = extract_player_stats(match_data, puuid)
+            tl = extract_timeline_stats(match_data, timeline_data, puuid)
+
+            p_team = tl.get("player_team", 100)
+            lines = [f"🕐 Timeline Analyse: {match_id}"]
+            lines.append(f"Spieler: {summoner_name}#{tag} | {base['champion']} ({base['position']})")
+            if tl.get("lane_opponent"):
+                lines.append(f"Lane-Gegner: {tl['lane_opponent']}")
+            lines.append(f"Ergebnis: {base['game_result']} | {base['game_duration_min']} min\n")
+
+            # ── Laning Phase ──
+            lines.append("── Frühphase (Laning) ──")
+            game_long_enough = tl.get("gold_10", 0) > 0
+
+            def diff_str(val: int) -> str:
+                return f"+{val:,}" if val >= 0 else f"{val:,}"
+
+            if game_long_enough:
+                has_15 = tl.get("gold_15", 0) > 0
+                col_10 = "@ Min 10"
+                col_15 = "@ Min 15" if has_15 else ""
+                lines.append(f"{'':16} {col_10:>10}{'':4}{col_15:>10}")
+
+                def row(label, key10, key15, fmt=lambda v: f"{v:>10,}"):
+                    r = f"{label:<16} {fmt(tl.get(key10, 0))}"
+                    if has_15:
+                        r += f"    {fmt(tl.get(key15, 0))}"
+                    return r
+
+                def diff_row(label, key10, key15):
+                    r = f"{label:<16} {diff_str(tl.get(key10, 0)):>10}"
+                    if has_15:
+                        r += f"    {diff_str(tl.get(key15, 0)):>10}"
+                    return r
+
+                lines.append(row("Gold:", "gold_10", "gold_15"))
+                if tl.get("has_opponent_data"):
+                    lines.append(diff_row("  vs Gegner:", "gold_diff_10", "gold_diff_15"))
+                lines.append(row("CS:", "cs_10", "cs_15", fmt=lambda v: f"{v:>10}"))
+                if tl.get("has_opponent_data"):
+                    lines.append(diff_row("  vs Gegner:", "cs_diff_10", "cs_diff_15"))
+                lines.append(row("Level:", "level_10", "level_15", fmt=lambda v: f"{v:>10}"))
+            else:
+                lines.append("  (Spiel zu kurz für Laning-Daten)")
+
+            # ── Tod-Timeline ──
+            deaths = tl.get("death_events", [])
+            lines.append("\n── Tod-Timeline ──")
+            if deaths:
+                phases = [
+                    ("Early (0-15 min)", lambda m: m <= 15),
+                    ("Mid   (15-25 min)", lambda m: 15 < m <= 25),
+                    ("Late  (25+ min)", lambda m: m > 25),
+                ]
+                for phase_name, pred in phases:
+                    times = [d["minute"] for d in deaths if pred(d["minute"])]
+                    count_str = f"{len(times)}x" if times else "0x"
+                    timing_str = f" ({', '.join(f'min {t}' for t in times)})" if times else ""
+                    lines.append(f"  {phase_name}: {count_str}{timing_str}")
+            else:
+                lines.append("  Keine Tode — perfektes Spiel!")
+
+            # ── Objectives ──
+            objectives = tl.get("objective_events", [])
+            if objectives:
+                lines.append("\n── Objektive ──")
+                for obj in objectives:
+                    team_label = "Dein Team  " if obj["team"] == p_team else "Gegner     "
+                    lines.append(f"  min {obj['minute']:>5}  │  {obj['label']:<20} →  {team_label}")
+
+            # ── Tower Timeline ──
+            towers = tl.get("tower_events", [])
+            if towers:
+                lines.append("\n── Tower Timeline ──")
+                lane_map = {"TOP_LANE": "Top", "MID_LANE": "Mid", "BOT_LANE": "Bot"}
+                for t in towers:
+                    lane = lane_map.get(t["lane"], t["lane"])
+                    loser = "Dein Team" if t["lost_by_team"] == p_team else "Gegner   "
+                    lines.append(f"  min {t['minute']:>5}  │  {lane} Tower  →  {loser} verloren")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # ----------------------------------------------------------------
         else:
             return [TextContent(type="text", text=f"Unbekanntes Tool: {name}")]
 
@@ -443,4 +651,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
